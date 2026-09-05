@@ -1,0 +1,213 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 wumengzhe
+#
+# 独立 CI 工作流：基于 wumengzhe/bl-mt798x-dhcpd 的 wmz-uboot 分支，
+# 构建 MT7981 / MT7986 的 ATF(BL2) + U-Boot(FIP)。
+# 本工作流刻意不放在源码仓库内（源码仓库为 bl-mt798x-dhcpd），
+# 而是作为单独的 CI 仓库存在（模仿 UBOOT-CI 的做法）。
+
+name: 798x-UBOOT-wmz
+
+on:
+  # 自动编译：每周四早上 06:00 (北京时间 = UTC 前一天 22:00)
+  schedule:
+    - cron: '0 22 * * 4'
+  # 手动编译：可指定版本 / 变体 / 特定机型
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'ATF/U-Boot 版本（决定用哪套 ATF）'
+        type: choice
+        options:
+          - '2025'
+          - 'SP1'
+          - 'SP2'
+        default: '2025'
+      variant:
+        description: '构建变体（default=标准 BL2+fip；ubootmod=.itb 布局）'
+        type: choice
+        options:
+          - 'default'
+          - 'ubootmod'
+          - 'ubi'
+          - 'nonmbm'
+          - 'openwrt'
+          - 'auto'
+        default: 'default'
+      boards:
+        description: '仅构建指定机型（逗号分隔，不含 soc 前缀，如 netcore_n60-pro,hg680p）。留空=构建全部 mt7981/mt7986'
+        type: string
+        default: ''
+
+permissions: write-all
+
+env:
+  GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+  WRT_REPO: https://github.com/wumengzhe/bl-mt798x-dhcpd.git
+  WRT_BRANCH: wmz-uboot
+  WRT_VER: ${{ inputs.version || '2025' }}
+  WRT_VAR: ${{ inputs.variant || 'default' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # gen：克隆源码、扫描 defconfig、生成分块构建矩阵
+  # ---------------------------------------------------------------------------
+  gen:
+    runs-on: ubuntu-latest
+    outputs:
+      chunks: ${{ steps.gen.outputs.chunks }}
+    steps:
+      - name: Checkout CI
+        uses: actions/checkout@v4
+
+      - name: Clone source (wmz-uboot)
+        run: |
+          git clone --depth=1 --single-branch --branch "$WRT_BRANCH" "$WRT_REPO" ./wrt
+
+      - name: Generate build matrix
+        id: gen
+        env:
+          BOARDS_FILTER: ${{ inputs.boards }}
+        run: |
+          python3 - <<'PY'
+          import os, json, re, glob
+
+          VER   = os.environ.get('WRT_VER', '2025').strip() or '2025'
+          VAR   = os.environ.get('WRT_VAR', 'default').strip() or 'default'
+          FILTER= os.environ.get('BOARDS_FILTER', '').strip()
+          filter_set = set(b.strip().lower() for b in FILTER.split(',') if b.strip()) if FILTER else None
+
+          base = './wrt'
+          # 收集 (soc, board)，去重，剔除 rfb/fpga 参考板
+          seen = {}
+          pat = re.compile(r'^(mt798[0-9a-f]*)_(.+?)(?:_multi_layout)?_defconfig$', re.I)
+          for f in glob.glob(os.path.join(base, 'uboot-mtk-20250711', 'configs*', 'mt798*_*.defconfig')):
+              m = pat.match(os.path.basename(f))
+              if not m:
+                  continue
+              soc = m.group(1).lower()
+              board = m.group(2).lower()
+              if soc not in ('mt7981', 'mt7986'):
+                  continue
+              if re.search(r'(rfb|fpga)', board):
+                  continue
+              seen[(soc, board)] = True
+
+          boards = sorted(seen.keys())
+          if filter_set:
+              boards = [(s, b) for (s, b) in boards if b in filter_set]
+
+          vdir = {'default':'configs','ubootmod':'configs-fit','ubi':'configs-ubi',
+                  'nonmbm':'configs-nonmbm','openwrt':'configs-openwrt'}
+          def has(soc, board, v):
+              return os.path.exists(os.path.join(base,'uboot-mtk-20250711',vdir[v],f'{soc}_{board}_defconfig'))
+
+          order = ['default','ubootmod','ubi','nonmbm','openwrt']
+          cmds = []
+          for soc, board in boards:
+              if VAR != 'auto' and VAR in vdir:
+                  v = VAR
+              else:
+                  v = next((c for c in order if has(soc, board, c)), 'default')
+              # 单块构建命令；SILENT=Y 避免交互卡住；失败不中断其它机型
+              cmds.append(f"SOC={soc} BOARD={board} VERSION={VER} VARIANT={v} SILENT=Y ./build.sh")
+
+          if not cmds:
+              cmds = ["echo 'NO_BOARDS_MATCHED'"]
+
+          CHUNK = 8
+          chunks = []
+          for i in range(0, len(cmds), CHUNK):
+              grp = cmds[i:i+CHUNK]
+              chunks.append({"idx": i // CHUNK, "cmds": "\n".join(grp)})
+
+          with open('chunks.json', 'w') as fp:
+              json.dump(chunks, fp)
+          print(f"boards_total={len(boards)}  chunks={len(chunks)}  VER={VER} VAR={VAR}")
+          print("chunks=" + json.dumps(chunks))
+          PY
+          echo "chunks=$(cat chunks.json)" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # build：按分块并行构建（每块一个 job，互不阻塞）
+  # ---------------------------------------------------------------------------
+  build:
+    needs: gen
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.gen.outputs.chunks) }}
+    steps:
+      - name: Checkout CI
+        uses: actions/checkout@v4
+
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt -yqq update
+          sudo -E apt -yqq install \
+            bison build-essential device-tree-compiler flex \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev \
+            python3 python3-pip nodejs npm u-boot-tools bc \
+            qemu-user-static dos2unix
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+
+      - name: Clone source (wmz-uboot)
+        run: |
+          git clone --depth=1 --single-branch --branch "$WRT_BRANCH" "$WRT_REPO" ./wrt
+
+      - name: Build chunk ${{ matrix.idx }}
+        run: |
+          set +e
+          cd ./wrt
+          ${{ matrix.cmds }}
+          echo "=== chunk ${{ matrix.idx }} done (exit ignored) ==="
+
+      - name: Upload artifacts (chunk ${{ matrix.idx }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mt798x-uboot-chunk-${{ matrix.idx }}
+          path: ./wrt/output/*
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # release：汇总所有分块产物，打包并发布
+  # ---------------------------------------------------------------------------
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Package firmware
+        run: |
+          cd ./artifacts
+          ZIP="mt798x-uboot-${{ env.WRT_VER }}-${{ env.WRT_VAR }}-$(TZ=UTC-8 date +%y.%m.%d).zip"
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          zip -r "$ZIP" mt798x-uboot-chunk-*/
+
+      - name: Release Firmware
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: wmz-uboot-${{ env.WRT_VER }}-${{ env.WRT_VAR }}-${{ github.run_number }}
+          files: ./artifacts/${{ env.ZIP }}
+          body: |
+            MT798X ATF(BL2) + U-Boot(FIP) 构建包（基于 wmz-uboot 分支）
+
+            源码： ${{ env.WRT_REPO }}
+            分支： ${{ env.WRT_BRANCH }}
+            版本： ${{ env.WRT_VER }}
+            变体： ${{ env.WRT_VAR }}
+
+            说明：
+            - default 变体产出 bl2-*.img + fip-*.bin（标准布局）
+            - ubootmod 变体产出适配 .itb 固件的 BL2/FIP
+            - 已包含 W25N04KV 等 512M SPI-NAND 支持补丁
+            - 刷机前请务必备份并保留 Factory 校准分区
