@@ -114,7 +114,8 @@ jobs:
           # ---- 收集候选机型（以 U-Boot configs 为准，去重，剔除 rfb/fpga）----
           seen = {}
           pat = re.compile(r'^(mt798[0-9a-f]*)_(.+?)(?:_multi_layout)?_defconfig$', re.I)
-          for f in glob.glob(os.path.join(base, 'uboot-mtk-20250711', 'configs*', 'mt798*_*.defconfig')):
+          # 注意：文件名是 <soc>_<board>_defconfig（下划线，不是 .defconfig）
+          for f in glob.glob(os.path.join(base, 'uboot-mtk-20250711', 'configs*', 'mt798*_defconfig')):
               m = pat.match(os.path.basename(f))
               if not m:
                   continue
@@ -162,6 +163,14 @@ jobs:
               cmds.append(f"SOC={soc} BOARD={board} VERSION={VER} VARIANT={chosen} SILENT=Y ./build.sh")
 
           print(f"[gen] candidates={len(cand)} buildable={len(cmds)} skipped={len(skipped)} VER={VER}({atf_dir}) VAR={VAR}")
+
+          if not cand:
+              print("::error::候选机型枚举为 0 —— 请检查上面的 [diag] 输出，确认 uboot-mtk-20250711/configs* 下存在 mt7981_*/mt7986_* 的 defconfig")
+              sample = glob.glob(os.path.join(base, 'uboot-mtk-20250711', 'configs', '*'))[:10]
+              print("[gen] configs/ 目录样例文件名：")
+              for s in sample:
+                  print("   -", os.path.basename(s))
+
           if skipped:
               print("[gen] skipped list (first 30):")
               for name, why in skipped[:30]:
@@ -178,8 +187,7 @@ jobs:
 
           with open('chunks.json', 'w') as fp:
               json.dump(chunks, fp)
-          print(f"boards_total={len(boards)}  chunks={len(chunks)}  VER={VER} VAR={VAR}")
-          print("chunks=" + json.dumps(chunks))
+          print(f"[gen] buildable={len(cmds)} chunks={len(chunks)} chunk_size={CHUNK} VER={VER} VAR={VAR}")
           PY
           echo "chunks=$(cat chunks.json)" >> "$GITHUB_OUTPUT"
 
