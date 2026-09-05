@@ -1,4 +1,4 @@
-# uboot-wmz
+# wmz_owner_uboot
 
 独立的 GitHub Actions CI，用于基于 [wumengzhe/bl-mt798x-dhcpd](https://github.com/wumengzhe/bl-mt798x-dhcpd)
 的 **`wmz-uboot` 分支** 构建 MT7981 / MT7986 的 ATF(BL2) + U-Boot(FIP)。
