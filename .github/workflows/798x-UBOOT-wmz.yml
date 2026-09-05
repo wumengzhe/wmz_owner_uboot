@@ -78,7 +78,40 @@ jobs:
           filter_set = set(b.strip().lower() for b in FILTER.split(',') if b.strip()) if FILTER else None
 
           base = './wrt'
-          # 收集 (soc, board)，去重，剔除 rfb/fpga 参考板
+
+          # VERSION -> ATF 源码目录（与 build.sh 的 ATF24/ATF25/ATF26 保持一致）
+          ATF_DIRS = {'2025': 'atf-20250711',
+                      'SP1':  'atf-20240117-bacca82a8',
+                      'SP2':  'atf-20260123'}
+          atf_dir = ATF_DIRS.get(VER, 'atf-20250711')
+
+          # VARIANT -> 配置子目录（与 build.sh resolve_config_paths 一致）
+          # 注意：ATF 侧 default/ubootmod/openwrt 都走 configs
+          ATF_VDIR = {'default':  'configs',
+                      'ubootmod': 'configs',
+                      'openwrt':  'configs',
+                      'ubi':      'configs-ubi',
+                      'nonmbm':   'configs-nonmbm'}
+          UBOOT_VDIR = {'default':  'configs',
+                        'ubootmod': 'configs-fit',
+                        'ubi':      'configs-ubi',
+                        'nonmbm':   'configs-nonmbm',
+                        'openwrt':  'configs-openwrt'}
+
+          # ---- 诊断：确认 ATF / U-Boot 配置目录真实可读（ATF configs 多为 symlink）----
+          print("=== [diag] config dirs ===")
+          for d in sorted(set([atf_dir] + ['atf-20250711','atf-20240117-bacca82a8','atf-20260123'])):
+              for c in ['configs','configs-ubi','configs-nonmbm']:
+                  p = os.path.join(base, d, c)
+                  n = len(glob.glob(os.path.join(p, '*_defconfig'))) if os.path.isdir(p) else -1
+                  print(f"  {d}/{c:<15s} exists={os.path.exists(p)} isdir={os.path.isdir(p)} defconfigs={n}")
+          for c in ['configs','configs-fit','configs-ubi','configs-nonmbm','configs-openwrt']:
+              p = os.path.join(base, 'uboot-mtk-20250711', c)
+              n = len(glob.glob(os.path.join(p, 'mt798*_defconfig'))) if os.path.isdir(p) else -1
+              print(f"  uboot-mtk-20250711/{c:<15s} exists={os.path.exists(p)} isdir={os.path.isdir(p)} mt798x_defconfigs={n}")
+          print("=== [diag] end ===")
+
+          # ---- 收集候选机型（以 U-Boot configs 为准，去重，剔除 rfb/fpga）----
           seen = {}
           pat = re.compile(r'^(mt798[0-9a-f]*)_(.+?)(?:_multi_layout)?_defconfig$', re.I)
           for f in glob.glob(os.path.join(base, 'uboot-mtk-20250711', 'configs*', 'mt798*_*.defconfig')):
@@ -93,24 +126,46 @@ jobs:
                   continue
               seen[(soc, board)] = True
 
-          boards = sorted(seen.keys())
+          cand = sorted(seen.keys())
           if filter_set:
-              boards = [(s, b) for (s, b) in boards if b in filter_set]
+              cand = [(s, b) for (s, b) in cand if b in filter_set]
 
-          vdir = {'default':'configs','ubootmod':'configs-fit','ubi':'configs-ubi',
-                  'nonmbm':'configs-nonmbm','openwrt':'configs-openwrt'}
-          def has(soc, board, v):
-              return os.path.exists(os.path.join(base,'uboot-mtk-20250711',vdir[v],f'{soc}_{board}_defconfig'))
+          def cfg_ok(soc, board, v):
+              """ATF 与 U-Boot 的 defconfig 必须同时存在，否则 build.sh 会 exit 1"""
+              a = os.path.isfile(os.path.join(base, atf_dir, ATF_VDIR[v], f'{soc}_{board}_defconfig'))
+              u = os.path.isfile(os.path.join(base, 'uboot-mtk-20250711', UBOOT_VDIR[v], f'{soc}_{board}_defconfig'))
+              return a, u
 
           order = ['default','ubootmod','ubi','nonmbm','openwrt']
-          cmds = []
-          for soc, board in boards:
-              if VAR != 'auto' and VAR in vdir:
-                  v = VAR
+          cmds, skipped = [], []
+          for soc, board in cand:
+              if VAR == 'auto':
+                  chosen = None
+                  for v in order:
+                      a, u = cfg_ok(soc, board, v)
+                      if a and u:
+                          chosen = v
+                          break
+                  if chosen is None:
+                      skipped.append((f'{soc}_{board}', 'no complete ATF+U-Boot defconfig in any variant'))
+                      continue
               else:
-                  v = next((c for c in order if has(soc, board, c)), 'default')
-              # 单块构建命令；SILENT=Y 避免交互卡住；失败不中断其它机型
-              cmds.append(f"SOC={soc} BOARD={board} VERSION={VER} VARIANT={v} SILENT=Y ./build.sh")
+                  a, u = cfg_ok(soc, board, VAR)
+                  if not (a and u):
+                      miss = []
+                      if not a: miss.append(f'ATF/{atf_dir}/{ATF_VDIR[VAR]}')
+                      if not u: miss.append(f'UBOOT/{UBOOT_VDIR[VAR]}')
+                      skipped.append((f'{soc}_{board}', 'missing: ' + ', '.join(miss)))
+                      continue
+                  chosen = VAR
+              # SILENT=Y 避免交互卡死
+              cmds.append(f"SOC={soc} BOARD={board} VERSION={VER} VARIANT={chosen} SILENT=Y ./build.sh")
+
+          print(f"[gen] candidates={len(cand)} buildable={len(cmds)} skipped={len(skipped)} VER={VER}({atf_dir}) VAR={VAR}")
+          if skipped:
+              print("[gen] skipped list (first 30):")
+              for name, why in skipped[:30]:
+                  print(f"   - {name}: {why}")
 
           if not cmds:
               cmds = ["echo 'NO_BOARDS_MATCHED'"]
@@ -158,12 +213,51 @@ jobs:
         run: |
           git clone --depth=1 --single-branch --branch "$WRT_BRANCH" "$WRT_REPO" ./wrt
 
+      # build.sh 的 check_environment 会在最早期执行 npm install，一旦失败全部机型归零。
+      # 这里先预热一次（带重试），让失败点暴露在独立步骤里，也避免偶发网络抖动。
+      - name: Prewarm failsafe JS deps
+        run: |
+          set +e
+          D=./wrt/uboot-mtk-20250711/failsafe/embedded
+          echo "node: $(node --version 2>&1) | npm: $(npm --version 2>&1)"
+          if [ -f "$D/package.json" ]; then
+            echo "=== npm install (预热) ==="
+            ( cd "$D" && npm install --no-audit --no-fund )
+            rc=$?
+            if [ $rc -ne 0 ]; then
+              echo "::warning::首次 npm install 失败 (rc=$rc)，重试一次"
+              ( cd "$D" && npm install --no-audit --no-fund )
+              rc2=$?
+              [ $rc2 -ne 0 ] && echo "::error::npm install 二次失败 (rc=$rc2) —— 后续所有机型都会构建失败"
+            fi
+            echo "=== node_modules 检查 ==="
+            ls "$D/node_modules" 2>/dev/null | head -10
+            echo "=== 关键依赖存在性 ==="
+            for m in uglify-js clean-css html-minifier-terser; do
+              [ -d "$D/node_modules/$m" ] && echo "  OK      $m" || echo "  MISSING $m"
+            done
+          else
+            echo "未找到 $D/package.json，跳过 npm 预热"
+          fi
+          exit 0
+
       - name: Build chunk ${{ matrix.idx }}
         run: |
           set +e
           cd ./wrt
           ${{ matrix.cmds }}
-          echo "=== chunk ${{ matrix.idx }} done (exit ignored) ==="
+          echo "=== chunk ${{ matrix.idx }} build loop finished ==="
+
+      - name: Diagnose output
+        if: always()
+        run: |
+          echo "=== output dir listing (chunk ${{ matrix.idx }}) ==="
+          if [ -d ./wrt/output ]; then
+            ls -la ./wrt/output/
+            echo "=== file count: $(find ./wrt/output -type f | wc -l) ==="
+          else
+            echo "!!! ./wrt/output 不存在 —— 本 chunk 全部机型构建失败（详见上一步日志中的 [ERROR]）"
+          fi
 
       - name: Upload artifacts (chunk ${{ matrix.idx }})
         if: always()
@@ -171,7 +265,7 @@ jobs:
         with:
           name: mt798x-uboot-chunk-${{ matrix.idx }}
           path: ./wrt/output/*
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 30
 
   # ---------------------------------------------------------------------------
@@ -188,7 +282,17 @@ jobs:
 
       - name: Package firmware
         run: |
+          mkdir -p ./artifacts
           cd ./artifacts
+          echo "=== downloaded artifacts ==="
+          ls -la .
+          shopt -s nullglob
+          dirs=(mt798x-uboot-chunk-*/)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "::error::没有任何构建产物（artifacts 目录为空）。请查看 build 阶段的 [ERROR] 日志：常见原因是 ATF 与 U-Boot 的 defconfig 未同时存在，或交叉编译依赖缺失。"
+            exit 1
+          fi
+          echo "=== found ${#dirs[@]} chunk dirs ==="
           ZIP="mt798x-uboot-${{ env.WRT_VER }}-${{ env.WRT_VAR }}-$(TZ=UTC-8 date +%y.%m.%d).zip"
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
           zip -r "$ZIP" mt798x-uboot-chunk-*/
