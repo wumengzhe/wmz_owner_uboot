@@ -83,7 +83,15 @@ jobs:
           ATF_DIRS = {'2025': 'atf-20250711',
                       'SP1':  'atf-20240117-bacca82a8',
                       'SP2':  'atf-20260123'}
-          atf_dir = ATF_DIRS.get(VER, 'atf-20250711')
+          VARIANT_NEEDS_DEFAULT_CONFIGS = {'default', 'ubootmod', 'openwrt'}
+          def select_atf(v, ver):
+              # 返回 (atf_dir, build_version)，让 build.sh 用到带 configs/ 的正确 ATF 线
+              if v in VARIANT_NEEDS_DEFAULT_CONFIGS:
+                  bver = ver if ver in ('SP1', 'SP2') else 'SP1'
+              else:  # ubi / nonmbm 只在 2025 线有对应 configs
+                  bver = '2025'
+              return ATF_DIRS[bver], bver
+          atf_dir, build_ver = select_atf(VAR, VER)
 
           # VARIANT -> 配置子目录（与 build.sh resolve_config_paths 一致）
           # 注意：ATF 侧 default/ubootmod/openwrt 都走 configs
@@ -110,6 +118,7 @@ jobs:
               n = len(glob.glob(os.path.join(p, 'mt798*_defconfig'))) if os.path.isdir(p) else -1
               print(f"  uboot-mtk-20250711/{c:<15s} exists={os.path.exists(p)} isdir={os.path.isdir(p)} mt798x_defconfigs={n}")
           print("=== [diag] end ===")
+          print(f"[gen] requested VER={VER} VAR={VAR} -> effective atf_dir={atf_dir} build_ver={build_ver}")
 
           # ---- 收集候选机型（以 U-Boot configs 为准，去重，剔除 rfb/fpga）----
           seen = {}
@@ -131,9 +140,9 @@ jobs:
           if filter_set:
               cand = [(s, b) for (s, b) in cand if b in filter_set]
 
-          def cfg_ok(soc, board, v):
+          def cfg_ok(soc, board, v, atf_d):
               """ATF 与 U-Boot 的 defconfig 必须同时存在，否则 build.sh 会 exit 1"""
-              a = os.path.isfile(os.path.join(base, atf_dir, ATF_VDIR[v], f'{soc}_{board}_defconfig'))
+              a = os.path.isfile(os.path.join(base, atf_d, ATF_VDIR[v], f'{soc}_{board}_defconfig'))
               u = os.path.isfile(os.path.join(base, 'uboot-mtk-20250711', UBOOT_VDIR[v], f'{soc}_{board}_defconfig'))
               return a, u
 
@@ -143,7 +152,7 @@ jobs:
               if VAR == 'auto':
                   chosen = None
                   for v in order:
-                      a, u = cfg_ok(soc, board, v)
+                      a, u = cfg_ok(soc, board, v, select_atf(v, VER)[0])
                       if a and u:
                           chosen = v
                           break
@@ -151,7 +160,7 @@ jobs:
                       skipped.append((f'{soc}_{board}', 'no complete ATF+U-Boot defconfig in any variant'))
                       continue
               else:
-                  a, u = cfg_ok(soc, board, VAR)
+                  a, u = cfg_ok(soc, board, VAR, atf_dir)
                   if not (a and u):
                       miss = []
                       if not a: miss.append(f'ATF/{atf_dir}/{ATF_VDIR[VAR]}')
@@ -159,8 +168,9 @@ jobs:
                       skipped.append((f'{soc}_{board}', 'missing: ' + ', '.join(miss)))
                       continue
                   chosen = VAR
-              # SILENT=Y 避免交互卡死
-              cmds.append(f"SOC={soc} BOARD={board} VERSION={VER} VARIANT={chosen} SILENT=Y ./build.sh")
+              # SILENT=Y 避免交互卡死；default 族强制用带 configs/ 的 ATF 线(SP1/SP2)
+              bver = select_atf(chosen, VER)[1]
+              cmds.append(f"SOC={soc} BOARD={board} VERSION={bver} VARIANT={chosen} SILENT=Y ./build.sh")
 
           print(f"[gen] candidates={len(cand)} buildable={len(cmds)} skipped={len(skipped)} VER={VER}({atf_dir}) VAR={VAR}")
 
