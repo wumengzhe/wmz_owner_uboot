@@ -38,6 +38,13 @@ on:
         description: '仅构建指定机型（逗号分隔，不含 soc 前缀，如 netcore_n60-pro,hg680p）。留空=构建全部 mt7981/mt7986'
         type: string
         default: ''
+      multilayout:
+        description: '多布局（1=一套 U-Boot 运行时自适应布局；0=分区表编译期固定）。仅 default/nonmbm 变体生效'
+        type: choice
+        options:
+          - '1'
+          - '0'
+        default: '1'
 
 permissions: write-all
 
@@ -47,6 +54,8 @@ env:
   WRT_BRANCH: wmz-uboot
   WRT_VER: ${{ inputs.version || '2025' }}
   WRT_VAR: ${{ inputs.variant || 'default' }}
+  WRT_ML: ${{ inputs.multilayout || '1' }}
+  WRT_ML_TAG: ${{ inputs.multilayout == '0' && 'single' || 'multi' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -56,6 +65,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       chunks: ${{ steps.gen.outputs.chunks }}
+      ml_on: ${{ steps.gen.outputs.ml_on }}
+      ml_off: ${{ steps.gen.outputs.ml_off }}
+      ml_na: ${{ steps.gen.outputs.ml_na }}
     steps:
       - name: Checkout CI
         uses: actions/checkout@v4
@@ -74,6 +86,7 @@ jobs:
 
           VER   = os.environ.get('WRT_VER', '2025').strip() or '2025'
           VAR   = os.environ.get('WRT_VAR', 'default').strip() or 'default'
+          ML    = os.environ.get('WRT_ML', '1').strip() or '1'
           FILTER= os.environ.get('BOARDS_FILTER', '').strip()
           filter_set = set(b.strip().lower() for b in FILTER.split(',') if b.strip()) if FILTER else None
 
@@ -147,7 +160,19 @@ jobs:
               return a, u
 
           order = ['default','ubootmod','ubi','nonmbm','openwrt']
+
+          # 多布局：build.sh 的 MULTI_LAYOUT=1 会把 defconfig 换成
+          # <soc>_<board>_multi_layout_defconfig（= 去掉 CONFIG_MTDIDS_DEFAULT /
+          # CONFIG_MTDPARTS_DEFAULT，改为 CONFIG_MEDIATEK_MULTI_MTD_LAYOUT=y，
+          # 运行时按 env mtd_layout 选布局）。
+          # 源码限制：仅 default / nonmbm 两个变体支持，其余变体会被 build.sh 强制关闭。
+          ML_VARIANT_OK = {'default', 'nonmbm'}
+          def ml_defconfig_path(soc, board, v):
+              return os.path.join(base, 'uboot-mtk-20250711', UBOOT_VDIR[v],
+                                  f'{soc}_{board}_multi_layout_defconfig')
+
           cmds, skipped = [], []
+          ml_on, ml_off, ml_na = [], [], []
           for soc, board in cand:
               if VAR == 'auto':
                   chosen = None
@@ -170,7 +195,17 @@ jobs:
                   chosen = VAR
               # SILENT=Y 避免交互卡死；default 族强制用带 configs/ 的 ATF 线(SP1/SP2)
               bver = select_atf(chosen, VER)[1]
-              cmds.append(f"SOC={soc} BOARD={board} VERSION={bver} VARIANT={chosen} SILENT=Y ./build.sh")
+              ml_env = ''
+              if ML == '1':
+                  if chosen in ML_VARIANT_OK:
+                      if os.path.isfile(ml_defconfig_path(soc, board, chosen)):
+                          ml_env = 'MULTI_LAYOUT=1 '
+                          ml_on.append(f'{soc}_{board}')
+                      else:
+                          ml_off.append(f'{soc}_{board}')
+                  else:
+                      ml_na.append(f'{soc}_{board}')
+              cmds.append(f"SOC={soc} BOARD={board} VERSION={bver} VARIANT={chosen} {ml_env}SILENT=Y ./build.sh")
 
           print(f"[gen] candidates={len(cand)} buildable={len(cmds)} skipped={len(skipped)} VER={VER}({atf_dir}) VAR={VAR}")
 
@@ -197,9 +232,47 @@ jobs:
 
           with open('chunks.json', 'w') as fp:
               json.dump(chunks, fp)
-          print(f"[gen] buildable={len(cmds)} chunks={len(chunks)} chunk_size={CHUNK} VER={VER} VAR={VAR}")
+          with open('mlstats.txt', 'w') as fp:
+              fp.write(f"ml_on={len(ml_on)}\nml_off={len(ml_off)}\nml_na={len(ml_na)}\n")
+          print(f"[gen] buildable={len(cmds)} chunks={len(chunks)} chunk_size={CHUNK} VER={VER} VAR={VAR} MULTI_LAYOUT={ML}")
+          if ML == '1':
+              print(f"[gen] multi-layout: 生效={len(ml_on)}  无配置回落单布局={len(ml_off)}  变体不支持={len(ml_na)}")
+              if ml_off:
+                  print("[gen] 回落单布局的机型（缺 *_multi_layout_defconfig）:")
+                  for b in ml_off[:30]:
+                      print(f"   - {b}")
+                  if len(ml_off) > 30:
+                      print(f"   ... 其余 {len(ml_off) - 30} 个省略")
+              if ml_na:
+                  if VAR == 'auto':
+                      print(f"[gen] {len(ml_na)} 个机型在 auto 降级中落到 ubi/ubootmod/openwrt 变体，"
+                            f"这些变体不支持多布局，按单布局构建")
+                  else:
+                      print(f"[gen] 变体 '{VAR}' 不支持多布局（源码仅 default/nonmbm），"
+                            f"{len(ml_na)} 个机型按单布局构建")
+          else:
+              print("[gen] multi-layout 已关闭（MULTI_LAYOUT=0），全部机型按编译期固定分区表构建")
+          print(f"::notice::multi-layout={ML} on={len(ml_on)} fallback={len(ml_off)} unsupported={len(ml_na)}")
           PY
-          echo "chunks=$(cat chunks.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "chunks=$(cat chunks.json)"
+            cat mlstats.txt
+          } >> "$GITHUB_OUTPUT"
+          if [ -f mlstats.txt ]; then
+            . ./mlstats.txt
+            {
+              echo "## 构建矩阵"
+              echo ""
+              echo "| 项目 | 值 |"
+              echo "|---|---|"
+              echo "| ATF/U-Boot 版本 | ${WRT_VER} |"
+              echo "| 变体 | ${WRT_VAR} |"
+              echo "| 多布局 MULTI_LAYOUT | ${WRT_ML} |"
+              echo "| 多布局生效 | ${ml_on} |"
+              echo "| 回落单布局（缺 *_multi_layout_defconfig） | ${ml_off} |"
+              echo "| 变体不支持多布局 | ${ml_na} |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # ---------------------------------------------------------------------------
   # build：按分块并行构建（每块一个 job，互不阻塞）
@@ -290,7 +363,7 @@ jobs:
   # release：汇总所有分块产物，打包并发布
   # ---------------------------------------------------------------------------
   release:
-    needs: build
+    needs: [gen, build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -311,14 +384,14 @@ jobs:
             exit 1
           fi
           echo "=== found ${#dirs[@]} chunk dirs ==="
-          ZIP="mt798x-uboot-${{ env.WRT_VER }}-${{ env.WRT_VAR }}-$(TZ=UTC-8 date +%y.%m.%d).zip"
+          ZIP="mt798x-uboot-${{ env.WRT_VER }}-${{ env.WRT_VAR }}-${{ env.WRT_ML_TAG }}-$(TZ=UTC-8 date +%y.%m.%d).zip"
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
           zip -r "$ZIP" mt798x-uboot-chunk-*/
 
       - name: Release Firmware
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: wmz-uboot-${{ env.WRT_VER }}-${{ env.WRT_VAR }}-${{ github.run_number }}
+          tag_name: wmz-uboot-${{ env.WRT_VER }}-${{ env.WRT_VAR }}-${{ env.WRT_ML_TAG }}-${{ github.run_number }}
           files: ./artifacts/${{ env.ZIP }}
           body: |
             MT798X ATF(BL2) + U-Boot(FIP) 构建包（基于 wmz-uboot 分支）
@@ -327,9 +400,15 @@ jobs:
             分支： ${{ env.WRT_BRANCH }}
             版本： ${{ env.WRT_VER }}
             变体： ${{ env.WRT_VAR }}
+            多布局： ${{ env.WRT_ML }}（1=启用，0=关闭）
+            多布局生效机型： ${{ needs.gen.outputs.ml_on }} 个｜回落单布局： ${{ needs.gen.outputs.ml_off }} 个｜变体不支持： ${{ needs.gen.outputs.ml_na }} 个
 
             说明：
             - default 变体产出 bl2-*.img + fip-*.bin（标准布局）
             - ubootmod 变体产出适配 .itb 固件的 BL2/FIP
+            - 多布局（CONFIG_MEDIATEK_MULTI_MTD_LAYOUT=y）不再把分区表编译期写死，
+              改由运行时按 U-Boot 环境变量 mtd_layout 选择，产物名带 -multi-layout 后缀
+            - 多布局仅对 default / nonmbm 变体有效（ubootmod / ubi / openwrt 在源码层面强制关闭），
+              缺 *_multi_layout_defconfig 的机型自动回落单布局
             - 已包含 W25N04KV 等 512M SPI-NAND 支持补丁
             - 刷机前请务必备份并保留 Factory 校准分区
