@@ -11,7 +11,7 @@ name: 798x-UBOOT-wmz
 on:
   # 自动编译：每周四早上 06:00 (北京时间 = UTC 前一天 22:00)
   schedule:
-    - cron: '0 22 * * 4'
+    - cron: '0 22 15 * *'
   # 手动编译：可指定版本 / 变体 / 特定机型
   workflow_dispatch:
     inputs:
