@@ -100,7 +100,8 @@ jobs:
           def select_atf(v, ver):
               # 返回 (atf_dir, build_version)，让 build.sh 用到带 configs/ 的正确 ATF 线
               if v in VARIANT_NEEDS_DEFAULT_CONFIGS:
-                  bver = ver if ver in ('SP1', 'SP2') else 'SP1'
+                  # 修正：version=2025 必须保留 2025 线(atf-20250711)，原判断把 2025 误降级成 SP1
+                  bver = ver if ver in ('2025', 'SP1', 'SP2') else 'SP1'
               else:  # ubi / nonmbm 只在 2025 线有对应 configs
                   bver = '2025'
               return ATF_DIRS[bver], bver
