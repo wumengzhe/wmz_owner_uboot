@@ -361,10 +361,37 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
-  # release：汇总所有分块产物，打包并发布
+  # gpt：基于 wmz-uboot 分支的 mt798x_gpt/*.json 生成 eMMC GPT 二进制
+  #      （默认 + _2G + _4G 三套布局，随 JSON 随源码演进；CI 自检用 python3 版工具）
+  # ---------------------------------------------------------------------------
+  gpt:
+    needs: gen
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CI
+        uses: actions/checkout@v4
+
+      - name: Clone source (wmz-uboot) for GPT JSON layouts
+        run: |
+          git clone --depth=1 --single-branch --branch "$WRT_BRANCH" "$WRT_REPO" ./wrt
+
+      - name: Generate GPT binaries (default + 2G + 4G)
+        run: |
+          bash ./gpt_tools/gen_gpt.sh ./wrt/mt798x_gpt ./output_gpt
+
+      - name: Upload GPT artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mt798x-gpt
+          path: ./output_gpt/*
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # release：汇总所有分块产物 + GPT 二进制，打包并发布
   # ---------------------------------------------------------------------------
   release:
-    needs: [gen, build]
+    needs: [gen, build, gpt]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -387,7 +414,8 @@ jobs:
           echo "=== found ${#dirs[@]} chunk dirs ==="
           ZIP="mt798x-uboot-${{ env.WRT_VER }}-${{ env.WRT_VAR }}-${{ env.WRT_ML_TAG }}-$(TZ=UTC-8 date +%y.%m.%d).zip"
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
-          zip -r "$ZIP" mt798x-uboot-chunk-*/
+          # 同时打包 eMMC GPT 分区表二进制（默认 + _2G + _4G 三套布局）
+          zip -r "$ZIP" mt798x-uboot-chunk-*/ mt798x-gpt/
 
       - name: Release Firmware
         uses: softprops/action-gh-release@v2
@@ -412,4 +440,12 @@ jobs:
             - 多布局仅对 default / nonmbm 变体有效（ubootmod / ubi / openwrt 在源码层面强制关闭），
               缺 *_multi_layout_defconfig 的机型自动回落单布局
             - 已包含 W25N04KV 等 512M SPI-NAND 支持补丁
+            - 包内同时提供 eMMC GPT 分区表（gpt-*.bin）：默认 / _2G / _4G 三套布局，
+              对应 mt798x_gpt/*.json 中同名 *.json / *_2G.json / *_4G.json
             - 刷机前请务必备份并保留 Factory 校准分区
+
+      - name: Prune old releases (keep latest 3)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash ./scripts/cleanup_releases.sh 3
