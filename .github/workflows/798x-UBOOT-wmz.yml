@@ -394,6 +394,11 @@ jobs:
     needs: [gen, build, gpt]
     runs-on: ubuntu-latest
     steps:
+      # 必须 checkout：末尾的 scripts/cleanup_releases.sh 来自本仓库，
+      # 仅靠 download-artifact 的工作区里没有它（否则 exit 127）。
+      - name: Checkout CI
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
