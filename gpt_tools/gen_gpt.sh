@@ -12,8 +12,9 @@
 # MediaTek mtk_gpt.py tooling is a python3 port shipped in this repo under
 # gpt_tools/), so it works on a stock ubuntu-latest runner with no python2.7.
 #
-# eMMC models that ship _2G / _4G layouts (mt7981-foo_2G.json etc.) therefore
-# yield gpt-foo.bin, gpt-foo_2G.bin and gpt-foo_4G.bin automatically.
+# eMMC models ship multiple layouts per JSON name: default / _2G / _4G / _2m / _4m
+# etc. (the _2m/_4m suffix marks the fip-partition size axis). Every *.json in the
+# source dir is auto-built, so adding a layout is as simple as dropping a JSON here.
 
 set -u
 

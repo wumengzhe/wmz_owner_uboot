@@ -445,8 +445,11 @@ jobs:
             - 多布局仅对 default / nonmbm 变体有效（ubootmod / ubi / openwrt 在源码层面强制关闭），
               缺 *_multi_layout_defconfig 的机型自动回落单布局
             - 已包含 W25N04KV 等 512M SPI-NAND 支持补丁
-            - 包内同时提供 eMMC GPT 分区表（gpt-*.bin）：默认 / _2G / _4G 三套布局，
-              对应 mt798x_gpt/*.json 中同名 *.json / *_2G.json / *_4G.json
+            - eMMC GPT 分区表（gpt-*.bin）由 mt798x_gpt/*.json 自动枚举，命名规范（双尺寸轴）：
+              轴1 = fip 分区大小（_2m = 2MiB fip + 32M kernel 无 config / _4m = 4MiB fip + config + 64M kernel）
+              轴2 = rootfs 大小（无后缀 = 整盘 / _2G / _4G）；组合如 gpt-foo_4m.bin、gpt-foo_2m_4G.bin
+            - BL2 与 fip.bin 对 _2m/_4m 通用（BL2 在 boot0 固定 LBA 13312 读 FIP），无需按 2M/4M 区分；
+              刷机时按所选 fip 尺寸挑对应 gpt-*.bin 即可
             - 刷机前请务必备份并保留 Factory 校准分区
 
       - name: Prune old releases (keep latest 3)
