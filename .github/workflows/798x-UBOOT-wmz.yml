@@ -55,7 +55,10 @@ env:
   WRT_VERSIONS: ${{ inputs.versions || '2025,SP1,SP2' }}
   WRT_VAR: ${{ inputs.variant || 'default' }}
   WRT_ML: ${{ inputs.multilayout || '1' }}
-  WRT_ML_TAG: ${{ inputs.multilayout == '0' && 'single' || 'multi' }}
+  # 注意：push/schedule 事件下 inputs.multilayout 为 null，直接写
+  # inputs.multilayout == '0' 会因 GHA 的 null->0 / '0'->0 强制转型而误判为真，
+  # 把 tag 错标成 single。必须先 || '1' 回落再比较。
+  WRT_ML_TAG: ${{ (inputs.multilayout || '1') == '0' && 'single' || 'multi' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -461,7 +464,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: wmz-uboot-${{ env.WRT_VER_TAG }}-${{ env.WRT_VAR }}-${{ env.WRT_ML_TAG }}-${{ github.run_number }}
-          files: ./artifacts/${{ env.ZIPS }}
+          # 用 glob 而不是展开 $ZIPS：ZIPS 是空格分隔的多个 zip 名，
+          # 逐个加 ./artifacts/ 前缀易错（曾导致整串被当成一个路径、零匹配、
+          # release 静默无 assets）。./artifacts/ 下只有打包步骤产出的 .zip。
+          files: ./artifacts/*.zip
           body: |
             MT798X ATF(BL2) + U-Boot(FIP) 构建包（基于 wmz-uboot 分支，多版本一次输出）
 
