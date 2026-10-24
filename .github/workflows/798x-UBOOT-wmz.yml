@@ -473,11 +473,13 @@ jobs:
           ML_NA: ${{ needs.gen.outputs.ml_na }}
         run: |
           set -euo pipefail
-          if [ ! -s zips.tsv ]; then
-            echo "::error::zips.tsv 为空——打包步骤没有产出任何版本 zip"
+          # 注意：打包步里 cd 了 ./artifacts，zips.tsv 实际写在 artifacts/ 下；
+          # 每个 run 步都从工作区根目录起，必须带 artifacts/ 前缀。
+          if [ ! -s artifacts/zips.tsv ]; then
+            echo "::error::artifacts/zips.tsv 为空或缺失——打包步骤没有产出任何版本 zip"
             exit 1
           fi
-          cat zips.tsv
+          cat artifacts/zips.tsv
           while IFS=$'\t' read -r VER ZIP; do
             [ -z "${VER:-}" ] && continue
             if [ ! -f "./artifacts/$ZIP" ]; then
@@ -524,8 +526,8 @@ jobs:
               --title "wmz-uboot ${VER}（${WRT_VAR} / ${WRT_ML_TAG}）" \
               --notes-file "$NOTES"
             echo "  已发布 $TAG"
-          done < zips.tsv
-          echo "=== 本次共发布 $(wc -l < zips.tsv) 个版本 release ==="
+          done < artifacts/zips.tsv
+          echo "=== 本次共发布 $(wc -l < artifacts/zips.tsv) 个版本 release ==="
 
       # 只保留本次 run 建的 release：每个 tag 都以 -<run_number> 结尾，
       # 不匹配的一律删（含 tag）。按「保留最近 N 个」会在多版本时
