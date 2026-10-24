@@ -9,6 +9,10 @@
 name: 798x-UBOOT-wmz
 
 on:
+  # 推送触发：本仓库 main 有新提交即自动构建（默认 2025/SP1/SP2 三版本）
+  push:
+    branches:
+      - main
   # 自动编译：每周四早上 06:00 (北京时间 = UTC 前一天 22:00)
   schedule:
     - cron: '0 22 15 * *'
@@ -485,8 +489,8 @@ jobs:
               刷机时按所选 fip 尺寸挑对应 gpt-*.bin 即可
             - 刷机前请务必备份并保留 Factory 校准分区
 
-      - name: Prune old releases (keep latest 3)
+      - name: Prune old releases (keep latest 1)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          bash ./scripts/cleanup_releases.sh 3
+          bash ./scripts/cleanup_releases.sh 1
