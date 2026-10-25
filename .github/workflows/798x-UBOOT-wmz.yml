@@ -520,7 +520,11 @@ jobs:
             缺 *_multi_layout_defconfig 的机型自动回落单布局
           - ubi / nonmbm 变体仅 2025 线有对应 ATF configs，这两个变体只出 2025 版本产物
           - NAND 多布局已支持 128M/256M/512M/1G 四档（layout label：lede/openwrt/256m/512m/1g/expand(auto)），
-            已补齐 kst-wf3000a / netcore-n30-pro / oray-x1-pro / netis-nx62 四机型的大闪存档位
+            所有 NAND 机型的分区档位已全覆盖（1G 档按各板实际闪存容量推算，eMMC 机型走 GPT 分区表，不适用本项）
+          - JCG Q30 与 JCG Q30 PRO 为同一硬件，uboot 产物通用：mt7981_jcg_q30 与 mt7981_jcg_q30-pro
+            两个 defconfig 分别对应 openwrt 变体与 default/ubootmod 变体，产物名不同但可互换刷入
+          - 本版修复了 51 个设备树 mtd-layout 节点缺失结尾分号的问题（此前会导致对应机型编译失败、
+            产物缺失），并补齐了 ATF 侧 JCG Q30 PRO 的配置，构建机型覆盖率已恢复
           - 已包含 W25N04KV 等 512M SPI-NAND 支持补丁
           - eMMC GPT 分区表（gpt-*.bin，随每个版本 zip 附带）由 mt798x_gpt/*.json 自动枚举，命名规范（双尺寸轴）：
             轴1 = fip 分区大小（_2m = 2MiB fip + 32M kernel 无 config / _4m = 4MiB fip + config + 64M kernel）
