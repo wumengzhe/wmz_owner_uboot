@@ -71,13 +71,16 @@ jobs:
       ml_on: ${{ steps.gen.outputs.ml_on }}
       ml_off: ${{ steps.gen.outputs.ml_off }}
       ml_na: ${{ steps.gen.outputs.ml_na }}
+      wrt_sha: ${{ steps.src.outputs.sha }}
     steps:
       - name: Checkout CI
         uses: actions/checkout@v4
 
       - name: Clone source (wmz-uboot)
+        id: src
         run: |
           git clone --depth=1 --single-branch --branch "$WRT_BRANCH" "$WRT_REPO" ./wrt
+          echo "sha=$(git -C ./wrt rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Generate build matrix
         id: gen
@@ -471,6 +474,7 @@ jobs:
           ML_ON: ${{ needs.gen.outputs.ml_on }}
           ML_OFF: ${{ needs.gen.outputs.ml_off }}
           ML_NA: ${{ needs.gen.outputs.ml_na }}
+          WRT_SHA: ${{ needs.gen.outputs.wrt_sha }}
         run: |
           set -euo pipefail
           # 注意：打包步里 cd 了 ./artifacts，zips.tsv 实际写在 artifacts/ 下；
@@ -493,6 +497,7 @@ jobs:
 
           源码： ${WRT_REPO}
           分支： ${WRT_BRANCH}
+          源码提交： ${WRT_SHA}
           版本： ${VER}（2025=atf-20250711 / SP1=atf-20240117 / SP2=atf-20260123）
           变体： ${WRT_VAR}
           多布局： ${WRT_ML}（1=启用，0=关闭）
