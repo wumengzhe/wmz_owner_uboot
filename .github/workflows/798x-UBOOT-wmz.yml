@@ -24,7 +24,7 @@ on:
         type: string
         default: '2025,SP1,SP2'
       variant:
-        description: '构建变体（default=标准 BL2+fip；ubootmod=.itb 布局）'
+        description: '构建变体（default=标准布局+NMBM+env 在 MTD；ubootmod=UBI bootmenu 可升 BL2/FIP，env 存 UBI 卷）'
         type: choice
         options:
           - 'default'
@@ -499,8 +499,16 @@ jobs:
           多布局生效机型： ${ML_ON} 个｜回落单布局： ${ML_OFF} 个｜变体不支持： ${ML_NA} 个
 
           说明：
-          - default 变体产出 bl2-*.img + fip-*.bin（标准布局）
-          - ubootmod 变体产出适配 .itb 固件的 BL2/FIP
+          - default 变体：标准布局，BL2 / FIP 位于裸 MTD 分区（bl2 / fip），U-Boot 环境变量存
+            MTD 的 u-boot-env（带冗余副本），启用 NMBM 坏块管理
+          - ubootmod 变体：BL2 / FIP / factory 仍位于裸 MTD 分区，但升级改由 UBI bootmenu 管理
+            （可在启动菜单 / Web 界面内直接升级 BL2 与 FIP）；环境变量改存 UBI 卷 ubootenv /
+            ubootenv2（冗余）；关闭 NMBM，mtdids 为 spi-nand0
+          - 两个变体均同时支持 .itb（FIT）与 .bin（sysupgrade tar）固件：写入侧按镜像头自动分派
+            （ITB → UBI "fit" 卷，tar → kernel + rootfs 卷），引导侧先探测 UBI "fit" 卷，
+            不存在则自动回落到 UBI "kernel" 卷
+          - 刷入时选择的分区模式（mtd_layout：lede/openwrt/256m/512m/1g/expand 等）会写入 U-Boot
+            环境变量并 env_save 持久化，下次开机与 Web 升级页均沿用上一次使用的分区模式
           - 多布局（CONFIG_MEDIATEK_MULTI_MTD_LAYOUT=y）不再把分区表编译期写死，
             改由运行时按 U-Boot 环境变量 mtd_layout 选择，产物名带 -multi-layout 后缀
           - 多布局仅对 default / nonmbm 变体有效（ubootmod / ubi / openwrt 在源码层面强制关闭），
