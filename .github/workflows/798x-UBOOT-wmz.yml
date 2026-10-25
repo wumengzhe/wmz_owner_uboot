@@ -9,7 +9,7 @@
 name: 798x-UBOOT-wmz
 
 on:
-  # 推送触发：本仓库 main 有新提交即自动构建（默认仅 2025 版本）
+  # 推送触发：本仓库 main 有新提交即自动构建（默认 2025/SP1/SP2 三版本）
   push:
     branches:
       - main
@@ -20,9 +20,9 @@ on:
   workflow_dispatch:
     inputs:
       versions:
-        description: 'ATF/U-Boot 版本，逗号分隔可多选：2025 / SP1 / SP2（默认 2025）'
+        description: 'ATF/U-Boot 版本，逗号分隔可多选：2025 / SP1 / SP2（默认三版本各出一个 release）'
         type: string
-        default: '2025'
+        default: '2025,SP1,SP2'
       variant:
         description: '构建变体（default=标准 BL2+fip；ubootmod=.itb 布局）'
         type: choice
@@ -52,7 +52,7 @@ env:
   GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
   WRT_REPO: https://github.com/wumengzhe/bl-mt798x-dhcpd.git
   WRT_BRANCH: wmz-uboot
-  WRT_VERSIONS: ${{ inputs.versions || '2025' }}
+  WRT_VERSIONS: ${{ inputs.versions || '2025,SP1,SP2' }}
   WRT_VAR: ${{ inputs.variant || 'default' }}
   WRT_ML: ${{ inputs.multilayout || '1' }}
   # 注意：push/schedule 事件下 inputs.multilayout 为 null，直接写
@@ -87,7 +87,7 @@ jobs:
           python3 - <<'PY'
           import os, json, re, glob
 
-          VER_LIST = [v.strip() for v in os.environ.get('WRT_VERSIONS', '2025').split(',') if v.strip()]
+          VER_LIST = [v.strip() for v in os.environ.get('WRT_VERSIONS', '2025,SP1,SP2').split(',') if v.strip()]
           VAR   = os.environ.get('WRT_VAR', 'default').strip() or 'default'
           ML    = os.environ.get('WRT_ML', '1').strip() or '1'
           FILTER= os.environ.get('BOARDS_FILTER', '').strip()
@@ -462,7 +462,7 @@ jobs:
           PY
 
       # 每版本独立 release：tag = wmz-uboot-<VER>-<var>-<ml>-<run_number>，
-      # 各自带版本 notes 与对应 zip（2025 / SP1 / SP2 是输入参数，默认 2025）。
+      # 各自带版本 notes 与对应 zip（2025 / SP1 / SP2 是输入参数，默认三版本全出）。
       # 不用 softprops/action-gh-release：它一次只能建一个 release，
       # 多版本会被塞进同一个 tag（wmz-uboot-2025-SP1-SP2-...）。
       - name: Release per version
