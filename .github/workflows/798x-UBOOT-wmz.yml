@@ -582,7 +582,9 @@ jobs:
           - 刷机前请务必备份并保留 Factory 校准分区
           - 本版引导/刷写收口（NAND+eMMC 统一 kernel 槽位优先）：修复"U-Boot 刷过 ITB 后，
             固件内 Web 升级反被旧 ITB 抢启动"的残卷隐患（FIT_BOOT_CONF 40 机型一并覆盖）；
-            eMMC 刷 ITB 时同步擦 kernel 分区头，rax3000m-emmc/jdcloud_re-cp-03 引导槽对齐 kernel 分区；
+            eMMC 刷 ITB 时同步擦 kernel 分区头，且当 GPT 为 kernel/rootfs 布局（本仓库 gpt-*.bin，
+            无 production 分区）时 ITB 直接写入 kernel 分区——ITB 与 bin 在 NAND/eMMC 上均可互刷；
+            rax3000m-emmc/jdcloud_re-cp-03 引导槽对齐 kernel 分区；
             修复 58 个 DTS layout@openwrt 档缺 mtdids 导致 Web 页切换布局静默失效的问题
           EOF
             echo "=== 创建 release: $TAG（asset: $ZIP） ==="
