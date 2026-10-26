@@ -48,7 +48,10 @@ env:
   WRT_VERSIONS: ${{ inputs.versions || '2025,SP1,SP2' }}
   # 变体输入支持逗号分隔多选（如 default,openwrt）与 all（全部 5 个变体）。
   # auto 仍保留：按 order 逐个探测，每个机型取第一个 ATF+U-Boot 配置齐备的变体。
-  WRT_VAR: ${{ inputs.variant || 'default' }}
+  # push/schedule 默认 default+openwrt：default 是主用包；openwrt 仅作备份线
+  # （残卷隐患已修：09029ca1 kernel 优先 + TFTP 写 fit 前清 kernel/rootfs），
+  # 随常规构建自动刷新备份包。手动 dispatch 可传 variant=default 只出主用包。
+  WRT_VAR: ${{ inputs.variant || 'default,openwrt' }}
   WRT_ML: ${{ inputs.multilayout || '1' }}
   # 注意：push/schedule 事件下 inputs.multilayout 为 null，直接写
   # inputs.multilayout == '0' 会因 GHA 的 null->0 / '0'->0 强制转型而误判为真，
