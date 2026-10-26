@@ -24,15 +24,8 @@ on:
         type: string
         default: '2025,SP1,SP2'
       variant:
-        description: '构建变体（default=标准布局+NMBM+env 在 MTD；ubootmod=UBI bootmenu 可升 BL2/FIP，env 存 UBI 卷）'
-        type: choice
-        options:
-          - 'default'
-          - 'ubootmod'
-          - 'ubi'
-          - 'nonmbm'
-          - 'openwrt'
-          - 'auto'
+        description: '构建变体，逗号分隔可多选（一次 run 同时出多套 release）：default=标准布局+NMBM+env 在 MTD；ubootmod=UBI bootmenu 可升 BL2/FIP，env 存 UBI 卷；ubi / nonmbm / openwrt 见表内说明。填 all = 全部 5 个变体'
+        type: string
         default: 'default'
       boards:
         description: '仅构建指定机型（逗号分隔，不含 soc 前缀，如 netcore_n60-pro,hg680p）。留空=构建全部 mt7981/mt7986'
@@ -53,6 +46,8 @@ env:
   WRT_REPO: https://github.com/wumengzhe/bl-mt798x-dhcpd.git
   WRT_BRANCH: wmz-uboot
   WRT_VERSIONS: ${{ inputs.versions || '2025,SP1,SP2' }}
+  # 变体输入支持逗号分隔多选（如 default,openwrt）与 all（全部 5 个变体）。
+  # auto 仍保留：按 order 逐个探测，每个机型取第一个 ATF+U-Boot 配置齐备的变体。
   WRT_VAR: ${{ inputs.variant || 'default' }}
   WRT_ML: ${{ inputs.multilayout || '1' }}
   # 注意：push/schedule 事件下 inputs.multilayout 为 null，直接写
@@ -71,6 +66,7 @@ jobs:
       ml_on: ${{ steps.gen.outputs.ml_on }}
       ml_off: ${{ steps.gen.outputs.ml_off }}
       ml_na: ${{ steps.gen.outputs.ml_na }}
+      variants: ${{ steps.gen.outputs.variants }}
       wrt_sha: ${{ steps.src.outputs.sha }}
     steps:
       - name: Checkout CI
@@ -91,12 +87,25 @@ jobs:
           import os, json, re, glob
 
           VER_LIST = [v.strip() for v in os.environ.get('WRT_VERSIONS', '2025,SP1,SP2').split(',') if v.strip()]
-          VAR   = os.environ.get('WRT_VAR', 'default').strip() or 'default'
+          VAR_RAW = os.environ.get('WRT_VAR', 'default').strip() or 'default'
           ML    = os.environ.get('WRT_ML', '1').strip() or '1'
           FILTER= os.environ.get('BOARDS_FILTER', '').strip()
           filter_set = set(b.strip().lower() for b in FILTER.split(',') if b.strip()) if FILTER else None
 
           base = './wrt'
+
+          ALL_VARIANTS = ['default', 'ubootmod', 'ubi', 'nonmbm', 'openwrt']
+          # 变体输入解析：逗号分隔多选 / all / auto
+          if VAR_RAW.lower() == 'all':
+              VAR_LIST = list(ALL_VARIANTS)
+          elif VAR_RAW.lower() == 'auto':
+              VAR_LIST = ['auto']
+          else:
+              VAR_LIST = [v.strip().lower() for v in VAR_RAW.split(',') if v.strip()]
+              bad = [v for v in VAR_LIST if v not in ALL_VARIANTS and v != 'auto']
+              if bad:
+                  raise SystemExit(f"::error::未知变体 {bad}，可选：{ALL_VARIANTS} 或 all 或 auto")
+          print(f"[gen] 请求变体: {VAR_RAW} -> {VAR_LIST}")
 
           # VERSION -> ATF 源码目录（与 build.sh 的 ATF24/ATF25/ATF26 保持一致）
           ATF_DIRS = {'2025': 'atf-20250711',
@@ -136,7 +145,7 @@ jobs:
               n = len(glob.glob(os.path.join(p, 'mt798*_defconfig'))) if os.path.isdir(p) else -1
               print(f"  uboot-mtk-20250711/{c:<15s} exists={os.path.exists(p)} isdir={os.path.isdir(p)} mt798x_defconfigs={n}")
           print("=== [diag] end ===")
-          print(f"[gen] requested VERSIONS={VER_LIST} VAR={VAR}")
+          print(f"[gen] requested VERSIONS={VER_LIST} VARIANTS={VAR_LIST}")
 
           # ---- 收集候选机型（以 U-Boot configs 为准，去重，剔除 rfb/fpga）----
           seen = {}
@@ -178,48 +187,49 @@ jobs:
 
           cmds, skipped = [], []
           ml_on, ml_off, ml_na = [], [], []
-          # 多版本展开：对每个请求的 VERSION 各生成一轮构建命令。
-          # ubi/nonmbm 变体在 select_atf 中被强制降级为 2025 线（只有该线有 configs），
-          # 此时 bver != ver，跳过该轮避免重复构建同名产物。
+          # 变体维度：VAR_LIST 中的每个变体各自独立判定可构建性。
+          # 多变体时同一机型会在多个变体下各构建一次；build.sh 的产物名已带
+          # 变体标识（-fit/-ubi/-openwrt/-nonmbm），文件名不冲突，可共存。
           for ver in VER_LIST:
             for soc, board in cand:
-              if VAR == 'auto':
-                  chosen = None
-                  for v in order:
-                      a, u = cfg_ok(soc, board, v, select_atf(v, ver)[0])
-                      if a and u:
-                          chosen = v
-                          break
-                  if chosen is None:
-                      skipped.append((f'{soc}_{board}', 'no complete ATF+U-Boot defconfig in any variant'))
-                      continue
-              else:
-                  atf_dir_v, _ = select_atf(VAR, ver)
-                  a, u = cfg_ok(soc, board, VAR, atf_dir_v)
-                  if not (a and u):
-                      miss = []
-                      if not a: miss.append(f'ATF/{atf_dir_v}/{ATF_VDIR[VAR]}')
-                      if not u: miss.append(f'UBOOT/{UBOOT_VDIR[VAR]}')
-                      skipped.append((f'{soc}_{board}', 'missing: ' + ', '.join(miss)))
-                      continue
-                  chosen = VAR
-              # SILENT=Y 避免交互卡死；default 族强制用带 configs/ 的 ATF 线(SP1/SP2)
-              atf_dir_v, bver = select_atf(chosen, ver)
-              if bver != ver:
-                  continue  # 该变体此版本无独立 ATF 线（ubi/nonmbm 仅 2025），2025 轮已构建
-              ml_env = ''
-              if ML == '1':
-                  if chosen in ML_VARIANT_OK:
-                      if os.path.isfile(ml_defconfig_path(soc, board, chosen)):
-                          ml_env = 'MULTI_LAYOUT=1 '
-                          ml_on.append(f'{soc}_{board}@{ver}')
-                      else:
-                          ml_off.append(f'{soc}_{board}@{ver}')
-                  else:
-                      ml_na.append(f'{soc}_{board}@{ver}')
-              cmds.append(f"SOC={soc} BOARD={board} VERSION={bver} VARIANT={chosen} {ml_env}SILENT=Y ./build.sh")
+              for v in VAR_LIST:
+                if v == 'auto':
+                    chosen = None
+                    for av in order:
+                        a, u = cfg_ok(soc, board, av, select_atf(av, ver)[0])
+                        if a and u:
+                            chosen = av
+                            break
+                    if chosen is None:
+                        skipped.append((f'{soc}_{board}', 'no complete ATF+U-Boot defconfig in any variant'))
+                        continue
+                else:
+                    atf_dir_v, _ = select_atf(v, ver)
+                    a, u = cfg_ok(soc, board, v, atf_dir_v)
+                    if not (a and u):
+                        miss = []
+                        if not a: miss.append(f'ATF/{atf_dir_v}/{ATF_VDIR[v]}')
+                        if not u: miss.append(f'UBOOT/{UBOOT_VDIR[v]}')
+                        skipped.append((f'{soc}_{board}@{v}', 'missing: ' + ', '.join(miss)))
+                        continue
+                    chosen = v
+                # SILENT=Y 避免交互卡死；default 族强制用带 configs/ 的 ATF 线(SP1/SP2)
+                atf_dir_v, bver = select_atf(chosen, ver)
+                if bver != ver:
+                    continue  # 该变体此版本无独立 ATF 线（ubi/nonmbm 仅 2025），2025 轮已构建
+                ml_env = ''
+                if ML == '1':
+                    if chosen in ML_VARIANT_OK:
+                        if os.path.isfile(ml_defconfig_path(soc, board, chosen)):
+                            ml_env = 'MULTI_LAYOUT=1 '
+                            ml_on.append(f'{soc}_{board}@{chosen}@{ver}')
+                        else:
+                            ml_off.append(f'{soc}_{board}@{chosen}@{ver}')
+                    else:
+                        ml_na.append(f'{soc}_{board}@{chosen}@{ver}')
+                cmds.append(f"SOC={soc} BOARD={board} VERSION={bver} VARIANT={chosen} {ml_env}SILENT=Y ./build.sh")
 
-          print(f"[gen] candidates={len(cand)} versions={VER_LIST} buildable={len(cmds)} skipped={len(skipped)} VAR={VAR}")
+          print(f"[gen] candidates={len(cand)} versions={VER_LIST} buildable={len(cmds)} skipped={len(skipped)} VARIANTS={VAR_LIST}")
 
           if not cand:
               print("::error::候选机型枚举为 0 —— 请检查上面的 [diag] 输出，确认 uboot-mtk-20250711/configs* 下存在 mt7981_*/mt7986_* 的 defconfig")
@@ -246,7 +256,11 @@ jobs:
               json.dump(chunks, fp)
           with open('mlstats.txt', 'w') as fp:
               fp.write(f"ml_on={len(ml_on)}\nml_off={len(ml_off)}\nml_na={len(ml_na)}\n")
-          print(f"[gen] buildable={len(cmds)} chunks={len(chunks)} chunk_size={CHUNK} VERSIONS={VER_LIST} VAR={VAR} MULTI_LAYOUT={ML}")
+          # 实际参与构建的变体集合（all/auto 展开后的真实值），供 release 步骤分组用
+          used_vars = sorted({c.split('VARIANT=')[1].split(' ')[0] for c in cmds if 'VARIANT=' in c})
+          with open('variants.txt', 'w') as fp:
+              fp.write(','.join(used_vars))
+          print(f"[gen] buildable={len(cmds)} chunks={len(chunks)} chunk_size={CHUNK} VERSIONS={VER_LIST} VARIANTS={VAR_LIST} MULTI_LAYOUT={ML}")
           if ML == '1':
               print(f"[gen] multi-layout: 生效={len(ml_on)}  无配置回落单布局={len(ml_off)}  变体不支持={len(ml_na)}")
               if ml_off:
@@ -256,12 +270,8 @@ jobs:
                   if len(ml_off) > 30:
                       print(f"   ... 其余 {len(ml_off) - 30} 个省略")
               if ml_na:
-                  if VAR == 'auto':
-                      print(f"[gen] {len(ml_na)} 个机型在 auto 降级中落到 ubi/ubootmod/openwrt 变体，"
-                            f"这些变体不支持多布局，按单布局构建")
-                  else:
-                      print(f"[gen] 变体 '{VAR}' 不支持多布局（源码仅 default/nonmbm），"
-                            f"{len(ml_na)} 个机型按单布局构建")
+                  print(f"[gen] {len(ml_na)} 个「机型×变体」组合不支持多布局"
+                        f"（源码仅 default/nonmbm 支持），按单布局构建")
           else:
               print("[gen] multi-layout 已关闭（MULTI_LAYOUT=0），全部机型按编译期固定分区表构建")
           print(f"::notice::multi-layout={ML} on={len(ml_on)} fallback={len(ml_off)} unsupported={len(ml_na)}")
@@ -269,6 +279,7 @@ jobs:
           {
             echo "chunks=$(cat chunks.json)"
             cat mlstats.txt
+            echo "variants=$(cat variants.txt)"
           } >> "$GITHUB_OUTPUT"
           if [ -f mlstats.txt ]; then
             . ./mlstats.txt
@@ -418,6 +429,8 @@ jobs:
           path: ./artifacts
 
       - name: Package firmware
+        env:
+          WRT_VARIANTS: ${{ needs.gen.outputs.variants }}
         run: |
           mkdir -p ./artifacts
           cd ./artifacts
@@ -430,46 +443,76 @@ jobs:
             exit 1
           fi
           echo "=== found ${#dirs[@]} chunk dirs ==="
-          # 多版本输出：build.sh 产物名带 _${VERSION}_ 段，按版本归类各打一个 zip
-          # （命名沿用上游 UBOOT-CI 风格：bl2-<soc>_<board>_<VERSION>_md5-xxx.img）
+          # 多版本 + 多变体输出：build.sh 产物名带 _${VERSION}_ 段与变体标识段
+          # （default 无后缀；ubootmod=-fit；ubi=-ubi；openwrt=-openwrt；nonmbm=-nonmbm），
+          # 按「版本 × 变体」分组各打一个 zip。
           python3 - <<'PY'
           import os, re, glob, subprocess
           versions = [v.strip() for v in os.environ['WRT_VERSIONS'].split(',') if v.strip()]
           files = [f for d in glob.glob('mt798x-uboot-chunk-*') for f in glob.glob(os.path.join(d, '*'))]
           print(f"[pkg] {len(files)} artifact files, versions={versions}")
           date = subprocess.run(['date', '+%y.%m.%d'], capture_output=True, text=True).stdout.strip()
-          var  = os.environ['WRT_VAR']
           ml   = os.environ['WRT_ML_TAG']
+          # 变体 → 产物名中的标识段（default 变体无后缀）
+          VAR_TAG = {'default': '', 'ubootmod': '-fit', 'ubi': '-ubi',
+                     'openwrt': '-openwrt', 'nonmbm': '-nonmbm'}
+          # 实际参与构建的变体（来自 gen job 的输出；all/auto 已在那边展开）
+          variants = [v.strip() for v in os.environ.get('WRT_VARIANTS', '').split(',') if v.strip()]
+          if not variants:
+              # 兜底：从产物名反推
+              variants = ['default']
+              for v, t in VAR_TAG.items():
+                  if t and any(t in os.path.basename(f) for f in files):
+                      variants.append(v)
+          print(f"[pkg] variants={variants}")
+
+          def variant_of(fname):
+              """从产物文件名反推所属变体（默认 default）"""
+              b = os.path.basename(fname)
+              # fip-<soc>_<board>_<VER>-<author>-dhcpd[-<vartag>][-fixed-parts][-multi-layout]_md5-*.bin
+              m = re.search(r'-dhcpd(-(fit|ubi|openwrt|nonmbm))?(-fixed-parts)?(-multi-layout)?_md5-', b)
+              if m:
+                  return {'fit': 'ubootmod', 'ubi': 'ubi',
+                          'openwrt': 'openwrt', 'nonmbm': 'nonmbm'}.get(m.group(2), 'default')
+              # bl2-<soc>_<board>_<VER>[-<vartag>]_md5-*.img
+              m = re.search(r'-((?:fit)|(?:ubi)|(?:openwrt)|(?:nonmbm))_md5-', b)
+              if m:
+                  return {'fit': 'ubootmod', 'ubi': 'ubi',
+                          'openwrt': 'openwrt', 'nonmbm': 'nonmbm'}[m.group(1)]
+              return 'default'
+
           made = []
           for ver in versions:
               # 版本段形如 _2025_ / _SP1_ / _2025- （fip 名为 _${VERSION}-${AUTHOR}-dhcpd）
               pat = re.compile(r'_(%s)(_|-)' % re.escape(ver))
-              sel = [f for f in files if pat.search(os.path.basename(f))]
-              if not sel:
-                  print(f"[pkg] WARN: version {ver} matched 0 files, skip")
-                  continue
-              zipname = f"mt798x-uboot-{ver}-{var}-{ml}-{date}.zip"
-              rc = subprocess.run(['zip', '-q', '-r', zipname] + sel + ['mt798x-gpt/']).returncode
-              print(f"[pkg] {zipname}: {len(sel)} files (rc={rc})")
-              if rc == 0:
-                  made.append((ver, zipname))
-          # 每版本一个 zip：写清单 <ver>\t<zip>，由 release 步骤逐版本建 release
+              ver_files = [f for f in files if pat.search(os.path.basename(f))]
+              for var in variants:
+                  sel = [f for f in ver_files if variant_of(f) == var]
+                  if not sel:
+                      print(f"[pkg] WARN: version {ver} variant {var} matched 0 files, skip")
+                      continue
+                  zipname = f"mt798x-uboot-{ver}-{var}-{ml}-{date}.zip"
+                  rc = subprocess.run(['zip', '-q', '-r', zipname] + sel + ['mt798x-gpt/']).returncode
+                  print(f"[pkg] {zipname}: {len(sel)} files (rc={rc})")
+                  if rc == 0:
+                      made.append((ver, var, zipname))
+          # 每「版本 × 变体」一个 zip：写清单 <ver>\t<var>\t<zip>，由 release 步骤逐组建 release
           # （不再用空格分隔的 ZIPS：softprops 只按换行/逗号分割，含空格的
           #   整串会当成一个 glob、零匹配，曾导致空 release「成功」）
           with open('zips.tsv', 'w') as fp:
-              for ver, z in made:
-                  fp.write(ver + '\t' + z + '\n')
+              for ver, var, z in made:
+                  fp.write(f"{ver}\t{var}\t{z}\n")
           with open(os.environ['GITHUB_ENV'], 'a') as fp:
               fp.write("ZIP_COUNT=" + str(len(made)) + "\n")
           if not made:
               raise SystemExit("no version zip produced")
           PY
 
-      # 每版本独立 release：tag = wmz-uboot-<VER>-<var>-<ml>-<run_number>，
+      # 每「版本 × 变体」独立 release：tag = wmz-uboot-<VER>-<var>-<ml>-<run_number>，
       # 各自带版本 notes 与对应 zip（2025 / SP1 / SP2 是输入参数，默认三版本全出）。
       # 不用 softprops/action-gh-release：它一次只能建一个 release，
       # 多版本会被塞进同一个 tag（wmz-uboot-2025-SP1-SP2-...）。
-      - name: Release per version
+      - name: Release per version and variant
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ML_ON: ${{ needs.gen.outputs.ml_on }}
@@ -485,24 +528,24 @@ jobs:
             exit 1
           fi
           cat artifacts/zips.tsv
-          while IFS=$'\t' read -r VER ZIP; do
+          while IFS=$'\t' read -r VER VAR ZIP; do
             [ -z "${VER:-}" ] && continue
             if [ ! -f "./artifacts/$ZIP" ]; then
               echo "::error::缺少 ./artifacts/$ZIP"
               exit 1
             fi
-            TAG="wmz-uboot-${VER}-${WRT_VAR}-${WRT_ML_TAG}-${{ github.run_number }}"
-            NOTES="./notes-${VER}.md"
+            TAG="wmz-uboot-${VER}-${VAR}-${WRT_ML_TAG}-${{ github.run_number }}"
+            NOTES="./notes-${VER}-${VAR}.md"
             cat > "$NOTES" <<EOF
-          MT798X ATF(BL2) + U-Boot(FIP) 构建包 —— 版本 ${VER}
+          MT798X ATF(BL2) + U-Boot(FIP) 构建包 —— 版本 ${VER} / 变体 ${VAR}
 
           源码： ${WRT_REPO}
           分支： ${WRT_BRANCH}
           源码提交： ${WRT_SHA}
           版本： ${VER}（2025=atf-20250711 / SP1=atf-20240117 / SP2=atf-20260123）
-          变体： ${WRT_VAR}
+          变体： ${VAR}
           多布局： ${WRT_ML}（1=启用，0=关闭）
-          多布局生效机型： ${ML_ON} 个｜回落单布局： ${ML_OFF} 个｜变体不支持： ${ML_NA} 个
+          多布局生效组合： ${ML_ON} 个｜回落单布局： ${ML_OFF} 个｜变体不支持： ${ML_NA} 个
 
           说明：
           - default 变体：标准布局，BL2 / FIP 位于裸 MTD 分区（bl2 / fip），U-Boot 环境变量存
@@ -510,9 +553,10 @@ jobs:
           - ubootmod 变体：BL2 / FIP / factory 仍位于裸 MTD 分区，但升级改由 UBI bootmenu 管理
             （可在启动菜单 / Web 界面内直接升级 BL2 与 FIP）；环境变量改存 UBI 卷 ubootenv /
             ubootenv2（冗余）；关闭 NMBM，mtdids 为 spi-nand0
-          - 两个变体均同时支持 .itb（FIT）与 .bin（sysupgrade tar）固件：写入侧按镜像头自动分派
-            （ITB → UBI "fit" 卷，tar → kernel + rootfs 卷），引导侧先探测 UBI "fit" 卷，
-            不存在则自动回落到 UBI "kernel" 卷
+          - 所有变体均同时支持 .itb（FIT）与 .bin（sysupgrade tar）固件：写入侧按镜像头自动分派
+            （ITB → UBI "fit" 卷 / eMMC "kernel" 分区，tar → kernel + rootfs 卷）；
+            引导侧先探测 UBI "fit" 卷，不存在则自动回落到 UBI "kernel" 卷，
+            且 bootm 对配置节点失配时自动退回 FIT 自带的 default 配置节点
           - 刷入时选择的分区模式（mtd_layout：lede/openwrt/256m/512m/1g/expand 等）会写入 U-Boot
             环境变量并 env_save 持久化，下次开机与 Web 升级页均沿用上一次使用的分区模式
           - 多布局（CONFIG_MEDIATEK_MULTI_MTD_LAYOUT=y）不再把分区表编译期写死，
@@ -542,11 +586,11 @@ jobs:
             fi
             gh release create "$TAG" "./artifacts/$ZIP" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "wmz-uboot ${VER}（${WRT_VAR} / ${WRT_ML_TAG}）" \
+              --title "wmz-uboot ${VER}（${VAR} / ${WRT_ML_TAG}）" \
               --notes-file "$NOTES"
             echo "  已发布 $TAG"
           done < artifacts/zips.tsv
-          echo "=== 本次共发布 $(wc -l < artifacts/zips.tsv) 个版本 release ==="
+          echo "=== 本次共发布 $(wc -l < artifacts/zips.tsv) 个「版本 × 变体」release ==="
 
       # 只保留本次 run 建的 release：每个 tag 都以 -<run_number> 结尾，
       # 不匹配的一律删（含 tag）。按「保留最近 N 个」会在多版本时
