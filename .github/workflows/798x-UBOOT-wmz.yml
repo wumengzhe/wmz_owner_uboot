@@ -580,6 +580,10 @@ jobs:
           - BL2 与 fip.bin 对 _2m/_4m 通用（BL2 在 boot0 固定 LBA 13312 读 FIP），无需按 2M/4M 区分；
             刷机时按所选 fip 尺寸挑对应 gpt-*.bin 即可
           - 刷机前请务必备份并保留 Factory 校准分区
+          - 本版引导/刷写收口（NAND+eMMC 统一 kernel 槽位优先）：修复"U-Boot 刷过 ITB 后，
+            固件内 Web 升级反被旧 ITB 抢启动"的残卷隐患（FIT_BOOT_CONF 40 机型一并覆盖）；
+            eMMC 刷 ITB 时同步擦 kernel 分区头，rax3000m-emmc/jdcloud_re-cp-03 引导槽对齐 kernel 分区；
+            修复 58 个 DTS layout@openwrt 档缺 mtdids 导致 Web 页切换布局静默失效的问题
           EOF
             echo "=== 创建 release: $TAG（asset: $ZIP） ==="
             if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
