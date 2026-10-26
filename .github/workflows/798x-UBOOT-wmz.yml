@@ -556,10 +556,15 @@ jobs:
           - ubootmod 变体：BL2 / FIP / factory 仍位于裸 MTD 分区，但升级改由 UBI bootmenu 管理
             （可在启动菜单 / Web 界面内直接升级 BL2 与 FIP）；环境变量改存 UBI 卷 ubootenv /
             ubootenv2（冗余）；关闭 NMBM，mtdids 为 spi-nand0
-          - 所有变体均同时支持 .itb（FIT）与 .bin（sysupgrade tar）固件：写入侧按镜像头自动分派
-            （ITB → UBI "fit" 卷 / eMMC "kernel" 分区，tar → kernel + rootfs 卷）；
-            引导侧先探测 UBI "fit" 卷，不存在则自动回落到 UBI "kernel" 卷，
-            且 bootm 对配置节点失配时自动退回 FIT 自带的 default 配置节点
+          - 所有变体均同时支持 .itb（FIT）与 .bin（sysupgrade tar）固件，且可任意互刷：
+            写入侧按镜像头自动分派（ITB → UBI "fit" 卷；tar → kernel + rootfs 卷；
+            eMMC 有 production 分区时 ITB 写 production，无则写 kernel 分区），
+            且两种写入互为互斥（写 ITB 会清 kernel/rootfs，写 tar 会清 fit），
+            bootm 对配置节点失配时自动退回 FIT 自带的 default 配置节点
+          - 引导侧统一以 UBI "kernel" 卷 / eMMC "kernel" 分区为主、fit（或 production）回落：
+            因"kernel 槽位存在 ⇒ 一定比 fit 新"，故永远启动最后一次刷入的固件；
+            固件内 Web 升级（只写 kernel/rootfs）与 U-Boot 侧刷写（写 fit 并清 kernel）
+            两条路径都不会留下更旧的对手卷
           - 刷入时选择的分区模式（mtd_layout：lede/openwrt/256m/512m/1g/expand 等）会写入 U-Boot
             环境变量并 env_save 持久化，下次开机与 Web 升级页均沿用上一次使用的分区模式
           - 多布局（CONFIG_MEDIATEK_MULTI_MTD_LAYOUT=y）不再把分区表编译期写死，
